@@ -1,0 +1,10 @@
+title: Berlitz Suomi 1
+deck_name: Berlitz Suomi 1
+source_language: fi
+target_language: en
+chapter_marker_pattern: 'TAVOITE\s*(\d+)\s*:'
+cards_per_chapter: 25
+extra_prompt: >
+  This is a Berlitz Finnish textbook. Focus on dialogue phrases, question-answer
+  drills, verb conjugations, and country/nationality vocabulary. Include case
+  forms (sta/stä, lta/ltä) where they appear in the lesson.
