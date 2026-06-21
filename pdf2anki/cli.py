@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import os
+import time
 
 import typer
 from rich.console import Console
@@ -16,10 +17,14 @@ from pdf2anki.anki_export import export_apkg, export_json, load_json_cards
 from pdf2anki.berlitz import extract_berlitz_cards
 from pdf2anki.config import load_config, save_config
 from pdf2anki.generator import generate_cards
+from pdf2anki.local_profile import profile_for_model
+from pdf2anki.lmstudio import ensure_model_loaded, ensure_server
 from pdf2anki.models import BookConfig
 from pdf2anki.pdf_reader import extract_chapters
+from pdf2anki.tags import chapter_label
 
 DEFAULT_LMSTUDIO_URL = "http://127.0.0.1:1234/v1"
+# Gemma fits 24 GB RAM reliably; Qwen works but uses tighter batch limits automatically.
 DEFAULT_LMSTUDIO_MODEL = "gemma-4-26b-a4b-it-heretic"
 
 app = typer.Typer(
@@ -115,6 +120,11 @@ def generate_cmd(
         "--mode",
         help="Card generation: auto (LLM if API key set, else berlitz), llm, berlitz",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Skip chapters already present in --cards-json",
+    ),
 ) -> None:
     """Generate Anki deck from a PDF book."""
     config = load_config(config_path)
@@ -141,8 +151,27 @@ def generate_cmd(
     if use_llm and not use_berlitz:
         effective_url = base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_LMSTUDIO_URL
         console.print(f"Using LLM ([dim]{model}[/dim] @ {effective_url})")
-        cards = []
+        if effective_url.startswith(("http://127.0.0.1", "http://localhost")):
+            ensure_server()
+            prof = profile_for_model(model)
+            ensure_model_loaded(model, context_length=prof.context_length)
+            if "qwen" in model.lower():
+                console.print(
+                    "[yellow]Qwen safe mode:[/yellow] small batches "
+                    f"({prof.cards_per_batch} cards × {prof.batches_per_chapter}, "
+                    f"{prof.cooldown_seconds:.0f}s pause). Close other apps."
+                )
+        cards: list = []
+        done_chapters: set[str] = set()
+        if resume and cards_json and cards_json.exists():
+            cards = load_json_cards(cards_json)
+            done_chapters = {c.chapter for c in cards}
+            console.print(f"Resuming — {len(done_chapters)} chapter(s) already in {cards_json}")
         for idx, ch in enumerate(chapters, 1):
+            label = chapter_label(ch.title)
+            if label in done_chapters:
+                console.print(f"  [{idx}/{len(chapters)}] {ch.title[:60]}... [dim]skipped[/dim]")
+                continue
             console.print(f"  [{idx}/{len(chapters)}] {ch.title[:60]}...")
             try:
                 chapter_cards = generate_cards(
@@ -157,11 +186,16 @@ def generate_cmd(
                 if cards_json and cards:
                     export_json(cards, cards_json)
                     console.print(f"       saved partial progress to {cards_json}")
-                raise
+                continue
             console.print(f"       → {len(chapter_cards)} cards")
             cards.extend(chapter_cards)
             if cards_json:
                 export_json(cards, cards_json)
+            prof = profile_for_model(model)
+            if prof.cooldown_seconds > 0 and effective_url.startswith(
+                ("http://127.0.0.1", "http://localhost")
+            ):
+                time.sleep(prof.cooldown_seconds)
     else:
         console.print("Using Berlitz rule-based extraction ([dim]no API key required[/dim])")
         cards = []

@@ -3,8 +3,19 @@ deck_name: Berlitz Suomi 1
 source_language: fi
 target_language: en
 chapter_marker_pattern: 'TAVOITE\s*(\d+)\s*:'
-cards_per_chapter: 25
+card_types:
+  - vocabulary
+  - phrase
+  - sentence
+  - grammar
+  - conjugation
+  - case
+  - cloze
+  - production
 extra_prompt: >
-  This is a Berlitz Finnish textbook. Focus on dialogue phrases, question-answer
-  drills, verb conjugations, and country/nationality vocabulary. Include case
-  forms (sta/stä, lta/ltä) where they appear in the lesson.
+  Berlitz Suomi 1. Skip map/flag drills and anything requiring kuva or Kuuntele.
+  Curate the most useful vocabulary and grammar — not every word in a list.
+  For each new -verbi section: conjugation cards + at least one production/cloze card.
+  For case grammar taught in the lesson: case cards with real examples.
+  Rewrite dialogue lines as standalone sentence or production cards.
+  Each batch is one chapter only (e.g. "2 — Esittäytyminen: Puhutko suomea").

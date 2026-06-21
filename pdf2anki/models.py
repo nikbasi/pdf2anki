@@ -11,6 +11,10 @@ class CardType(str, Enum):
     PHRASE = "phrase"
     SENTENCE = "sentence"
     GRAMMAR = "grammar"
+    CONJUGATION = "conjugation"
+    CASE = "case"
+    CLOZE = "cloze"
+    PRODUCTION = "production"
 
 
 class Flashcard(BaseModel):
@@ -48,12 +52,17 @@ class BookConfig(BaseModel):
     )
     chapters: Optional[list[dict]] = None  # manual: [{title, page_start, page_end}]
     chapter_marker_pattern: Optional[str] = None  # e.g. Berlitz "TAVOITE 1:"
-    cards_per_chapter: int = 30
+    cards_per_chapter: int | None = None  # optional soft hint only
     card_types: list[CardType] = Field(
         default_factory=lambda: [
             CardType.VOCABULARY,
             CardType.PHRASE,
             CardType.SENTENCE,
+            CardType.GRAMMAR,
+            CardType.CONJUGATION,
+            CardType.CASE,
+            CardType.CLOZE,
+            CardType.PRODUCTION,
         ]
     )
     extra_prompt: str = ""

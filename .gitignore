@@ -12,7 +12,10 @@ dist/
 chapters.json
 cards.json
 *-cards.json
+!berlitz-cards.json
 test-cards.json
+berlitz-*-test.json
+*-regen.log
 berlitz-generate.log
 book.yaml
 finnish.yaml
