@@ -6,6 +6,11 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class GenerationStyle(str, Enum):
+    CURATED = "curated"
+    COMPREHENSIVE = "comprehensive"
+
+
 class CardType(str, Enum):
     VOCABULARY = "vocabulary"
     PHRASE = "phrase"
@@ -52,7 +57,9 @@ class BookConfig(BaseModel):
     )
     chapters: Optional[list[dict]] = None  # manual: [{title, page_start, page_end}]
     chapter_marker_pattern: Optional[str] = None  # e.g. Berlitz "TAVOITE 1:"
-    cards_per_chapter: int | None = None  # optional soft hint only
+    cards_per_chapter: int | None = None  # optional soft hint only (curated mode)
+    generation_style: GenerationStyle = GenerationStyle.CURATED
+    extra_prompt_comprehensive: str = ""
     card_types: list[CardType] = Field(
         default_factory=lambda: [
             CardType.VOCABULARY,

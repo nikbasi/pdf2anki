@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import dataclass
 
 _TAVOITE = re.compile(r"^TAVOITE\s*(\d+)\s*:\s*(.+)$", re.I | re.DOTALL)
+_LABEL = re.compile(r"^(\d+)\s*—\s*(.+)$")
 
 
 _NBSP = "\u202f"  # narrow no-break space — looks like a space but is valid in Anki tags
@@ -17,7 +18,7 @@ class ChapterInfo:
 
     @property
     def label(self) -> str:
-        return f"{self.number} — {self.short_title}"
+        return f"{self.number:02d} — {self.short_title}"
 
     @property
     def tag(self) -> str:
@@ -68,6 +69,11 @@ def chapter_label(chapter_title: str) -> str:
     info = parse_chapter_title(chapter_title)
     if info:
         return info.label
+    label_match = _LABEL.match(chapter_title.strip())
+    if label_match:
+        number = int(label_match.group(1))
+        short = label_match.group(2).strip()
+        return f"{number:02d} — {short}"
     return chapter_title.strip()
 
 
@@ -75,7 +81,25 @@ def chapter_tag(chapter_title: str) -> str:
     info = parse_chapter_title(chapter_title)
     if info:
         return info.tag
-    return chapter_title.strip().replace(" ", _NBSP)
+    return chapter_label(chapter_title).replace(" ", _NBSP)
+
+
+def chapter_filename_slug(chapter_title: str) -> str:
+    """Filesystem-safe slug for per-chapter deck files."""
+    info = parse_chapter_title(chapter_title)
+    if info:
+        return f"{info.number:02d}-{_slugify(info.short_title)}"
+    label_match = _LABEL.match(chapter_title.strip())
+    if label_match:
+        number = int(label_match.group(1))
+        short = label_match.group(2).strip()
+        return f"{number:02d}-{_slugify(short)}"
+    slug = _slugify(chapter_title)
+    return slug or "chapter"
+
+
+def chapter_deck_name(book_name: str, chapter_title: str) -> str:
+    return f"{book_name} :: {chapter_label(chapter_title)}"
 
 
 def card_tags(chapter_title: str, card_type: str) -> list[str]:

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import random
+import re
+import zlib
 from pathlib import Path
 
 import genanki
 
 from pdf2anki.models import BookConfig, Flashcard
+from pdf2anki.tags import chapter_deck_name
 
 MODEL_ID = 1607392319
 
@@ -49,32 +52,95 @@ def _note_model() -> genanki.Model:
     )
 
 
+def _deck_id(name: str) -> int:
+    return zlib.adler32(name.encode("utf-8")) & 0x7FFFFFFF
+
+
+def _chapter_sort_key(chapter_name: str) -> tuple[int, str]:
+    match = re.match(r"^(\d+)", chapter_name.strip())
+    if match:
+        return (int(match.group(1)), chapter_name)
+    return (9999, chapter_name)
+
+
+def _note_for_card(card: Flashcard, model: genanki.Model, config: BookConfig) -> genanki.Note:
+    return genanki.Note(
+        model=model,
+        fields=[
+            card.front,
+            card.back,
+            card.context or "",
+            card.chapter,
+            card.card_type.value,
+        ],
+        tags=card.tags + [config.source_language, config.target_language],
+    )
+
+
+def _build_multideck_package(
+    cards: list[Flashcard],
+    config: BookConfig,
+    out: Path,
+) -> Path:
+    by_chapter: dict[str, list[Flashcard]] = {}
+    for card in cards:
+        by_chapter.setdefault(card.chapter, []).append(card)
+
+    model = _note_model()
+    decks: list[genanki.Deck] = []
+    for chapter_name in sorted(by_chapter, key=_chapter_sort_key):
+        deck_name = chapter_deck_name(config.deck_name, chapter_name)
+        deck = genanki.Deck(_deck_id(deck_name), deck_name)
+        for card in by_chapter[chapter_name]:
+            deck.add_note(_note_for_card(card, model, config))
+        decks.append(deck)
+
+    genanki.Package(decks).write_to_file(str(out))
+    return out
+
+
+def export_multideck_apkg(
+    cards: list[Flashcard],
+    config: BookConfig,
+    output_path: str | Path,
+) -> Path:
+    """Bundle all chapter decks into one importable .apkg (merges into existing collection)."""
+    out = Path(output_path)
+    if out.suffix != ".apkg":
+        out = out.with_suffix(".apkg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return _build_multideck_package(cards, config, out)
+
+
+def export_colpkg(
+    cards: list[Flashcard],
+    config: BookConfig,
+    output_path: str | Path,
+) -> Path:
+    """Bundle all chapter decks into one collection package (.colpkg)."""
+    out = Path(output_path)
+    if out.suffix != ".colpkg":
+        out = out.with_suffix(".colpkg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return _build_multideck_package(cards, config, out)
+
+
 def export_apkg(
     cards: list[Flashcard],
     config: BookConfig,
     output_path: str | Path,
     *,
     deck_id: int | None = None,
+    deck_name: str | None = None,
 ) -> Path:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    deck = genanki.Deck(deck_id or random.randrange(1 << 30), config.deck_name)
+    deck = genanki.Deck(deck_id or random.randrange(1 << 30), deck_name or config.deck_name)
     model = _note_model()
 
     for card in cards:
-        note = genanki.Note(
-            model=model,
-            fields=[
-                card.front,
-                card.back,
-                card.context or "",
-                card.chapter,
-                card.card_type.value,
-            ],
-            tags=card.tags + [config.source_language, config.target_language],
-        )
-        deck.add_note(note)
+        deck.add_note(_note_for_card(card, model, config))
 
     package = genanki.Package(deck)
     package.write_to_file(str(out))

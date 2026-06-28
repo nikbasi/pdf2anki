@@ -9,7 +9,7 @@ import fitz
 import genanki
 import pytest
 
-from pdf2anki.anki_export import export_apkg, export_json, load_json_cards
+from pdf2anki.anki_export import export_apkg, export_colpkg, export_json, export_multideck_apkg, load_json_cards
 from pdf2anki.config import load_config, save_config
 from pdf2anki.models import BookConfig, CardType, Flashcard
 from pdf2anki.pdf_reader import extract_chapters
@@ -96,3 +96,27 @@ def test_json_export_roundtrip(tmp_path: Path) -> None:
     export_json(cards, path)
     loaded = load_json_cards(path)
     assert loaded[0].front == "a"
+
+
+def test_export_colpkg_multi_deck(tmp_path: Path) -> None:
+    cards = [
+        Flashcard(front="hei", back="hello", chapter="1 — Hei", tags=["1"]),
+        Flashcard(front="moi", back="hi", chapter="2 — Moi", tags=["2"]),
+    ]
+    config = BookConfig(deck_name="Test Book")
+    out = export_multideck_apkg(cards, config, tmp_path / "book.apkg")
+    assert out.exists()
+    assert out.suffix == ".apkg"
+
+    import sqlite3
+    import zipfile
+
+    with zipfile.ZipFile(out) as zf:
+        assert "collection.anki2" in zf.namelist()
+        db = tmp_path / "col.db"
+        db.write_bytes(zf.read("collection.anki2"))
+    conn = sqlite3.connect(db)
+    deck_count = len(json.loads(conn.execute("SELECT decks FROM col").fetchone()[0]))
+    card_count = conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+    assert deck_count >= 2
+    assert card_count == 2

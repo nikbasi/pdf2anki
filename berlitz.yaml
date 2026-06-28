@@ -19,3 +19,10 @@ extra_prompt: >
   For case grammar taught in the lesson: case cards with real examples.
   Rewrite dialogue lines as standalone sentence or production cards.
   Each batch is one chapter only (e.g. "2 — Esittäytyminen: Puhutko suomea").
+extra_prompt_comprehensive: >
+  Berlitz Suomi 1. Skip map/flag drills and anything requiring kuva or Kuuntele.
+  Cover ALL vocabulary, conjugations, case forms, grammar rules, dialogue lines, and exercises.
+  For each -verbi section: a conjugation card for every person/tense shown + production/cloze cards.
+  For case grammar: a case card for every form taught with real examples.
+  Rewrite every dialogue line as a standalone sentence or production card.
+  Include every word in vocabulary lists — not just highlights.

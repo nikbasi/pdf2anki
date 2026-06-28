@@ -13,10 +13,18 @@ from pdf2anki.lmstudio import ensure_model_loaded
 from pdf2anki.local_profile import LocalProfile, profile_for_model
 from pdf2anki.tags import card_tags, chapter_label
 from pdf2anki.models import BookConfig, CardType, Chapter, Flashcard
-from pdf2anki.prompts import build_user_prompt, system_prompt_for
+from pdf2anki.prompts import (
+    build_user_prompt,
+    chunk_chapter_text,
+    is_comprehensive,
+    system_prompt_for,
+)
 
 LOCAL_LM_HOSTS = ("http://127.0.0.1", "http://localhost")
 _QWEN_ASSISTANT_PREFILL = " \n"
+_COMPREHENSIVE_CARDS_PER_BATCH = 15
+_COMPREHENSIVE_MAX_BATCHES_PER_CHUNK = 12
+_COMPREHENSIVE_MIN_BATCH_CARDS = 2
 
 
 def _is_local_lm(base_url: str) -> bool:
@@ -90,15 +98,39 @@ def _clean_json_text(raw: str) -> str:
     return raw.strip()
 
 
+def _salvage_cards_from_raw(raw: str) -> list | None:
+    """Recover complete card objects from truncated LLM JSON."""
+    cards: list = []
+    for match in re.finditer(
+        r'\{\s*"front"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*"back"\s*:\s*"(?:[^"\\]|\\.)*"[^}]*\}',
+        raw,
+    ):
+        try:
+            item = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict) and "front" in item and "back" in item:
+            cards.append(item)
+    return cards or None
+
+
 def _extract_json_payload(content: str) -> list:
     raw = _clean_json_text(content)
+    parsed = None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
+        if match:
+            try:
+                parsed = json.loads(_clean_json_text(match.group(0)))
+            except json.JSONDecodeError:
+                pass
+        if parsed is None:
+            salvaged = _salvage_cards_from_raw(raw)
+            if salvaged:
+                return salvaged
             raise
-        parsed = json.loads(_clean_json_text(match.group(0)))
 
     if isinstance(parsed, list):
         return parsed
@@ -281,6 +313,72 @@ def _generate_local_batched(
     return all_cards
 
 
+def _dedup_cards(cards: list[Flashcard], seen: set[str]) -> list[Flashcard]:
+    unique: list[Flashcard] = []
+    for card in cards:
+        key = card.front.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(card)
+    return unique
+
+
+def _generate_comprehensive(
+    chapter: Chapter,
+    config: BookConfig,
+    *,
+    client: OpenAI,
+    model: str,
+    base_url: str,
+    profile: LocalProfile,
+    local: bool,
+) -> list[Flashcard]:
+    """Multi-chunk, multi-batch generation for full chapter coverage."""
+    chunks = chunk_chapter_text(chapter.text, profile.max_input_chars)
+    all_cards: list[Flashcard] = []
+    seen: set[str] = set()
+    cards_per_batch = profile.cards_per_batch or _COMPREHENSIVE_CARDS_PER_BATCH
+    max_batches = max(profile.batches_per_chapter, _COMPREHENSIVE_MAX_BATCHES_PER_CHUNK)
+
+    for chunk_idx, chunk_text in enumerate(chunks, 1):
+        batch = 1
+        while batch <= max_batches:
+            messages = [
+                {"role": "system", "content": system_prompt_for(config, local=local)},
+                {
+                    "role": "user",
+                    "content": build_user_prompt(
+                        chapter,
+                        config,
+                        max_chars=profile.max_input_chars,
+                        batch=batch,
+                        max_cards=cards_per_batch,
+                        existing_fronts=list(seen) if seen else None,
+                        chunk=chunk_idx,
+                        total_chunks=len(chunks),
+                        text_override=chunk_text,
+                    ),
+                },
+            ]
+            batch_cards = _single_completion(
+                client,
+                model=model,
+                messages=messages,
+                base_url=base_url,
+                profile=profile,
+                chapter=chapter,
+            )
+            new_cards = _dedup_cards(batch_cards, seen)
+            all_cards.extend(new_cards)
+            if len(new_cards) < _COMPREHENSIVE_MIN_BATCH_CARDS:
+                break
+            batch += 1
+            if local and profile.cooldown_seconds > 0:
+                time.sleep(profile.cooldown_seconds)
+
+    return all_cards
+
+
 def generate_cards_for_chapter(
     chapter: Chapter,
     config: BookConfig,
@@ -299,12 +397,35 @@ def generate_cards_for_chapter(
     if _is_local_lm(effective_url):
         ensure_model_loaded(model, context_length=profile.context_length)
         model = _resolve_model_id(client, model)
+        if is_comprehensive(config):
+            local = profile.batches_per_chapter > 1
+            return _generate_comprehensive(
+                chapter,
+                config,
+                client=client,
+                model=model,
+                base_url=effective_url,
+                profile=profile,
+                local=local,
+            )
         if profile.batches_per_chapter > 1:
             return _generate_local_batched(
                 chapter, config, client=client, model=model, base_url=effective_url, profile=profile
             )
         return _generate_local_single(
             chapter, config, client=client, model=model, base_url=effective_url, profile=profile
+        )
+
+    cloud_profile = LocalProfile(4096, 4096, 12000, 30, 1, 0, 1)
+    if is_comprehensive(config):
+        return _generate_comprehensive(
+            chapter,
+            config,
+            client=client,
+            model=model,
+            base_url=effective_url,
+            profile=cloud_profile,
+            local=False,
         )
 
     messages = [
@@ -314,7 +435,6 @@ def generate_cards_for_chapter(
             "content": build_user_prompt(chapter, config, max_chars=12000),
         },
     ]
-    cloud_profile = LocalProfile(4096, 4096, 12000, 30, 1, 0, 1)
     return _single_completion(
         client,
         model=model,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -13,15 +14,15 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from pdf2anki.anki_export import export_apkg, export_json, load_json_cards
+from pdf2anki.anki_export import export_apkg, export_colpkg, export_json, export_multideck_apkg, load_json_cards
 from pdf2anki.berlitz import extract_berlitz_cards
 from pdf2anki.config import load_config, save_config
 from pdf2anki.generator import generate_cards
 from pdf2anki.local_profile import profile_for_model
 from pdf2anki.lmstudio import ensure_model_loaded, ensure_server
-from pdf2anki.models import BookConfig
+from pdf2anki.models import BookConfig, GenerationStyle
 from pdf2anki.pdf_reader import extract_chapters
-from pdf2anki.tags import chapter_label
+from pdf2anki.tags import chapter_deck_name, chapter_filename_slug, chapter_label
 
 DEFAULT_LMSTUDIO_URL = "http://127.0.0.1:1234/v1"
 # Gemma fits 24 GB RAM reliably; Qwen works but uses tighter batch limits automatically.
@@ -33,6 +34,24 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _book_slug(name: str) -> str:
+    slug = re.sub(r"[^\w\s-]", "", name.lower())
+    slug = re.sub(r"[\s_]+", "-", slug.strip())
+    return re.sub(r"-+", "-", slug).strip("-") or "deck"
+
+
+def _deck_output_dir(output: Path) -> Path:
+    """When writing one deck per chapter, -o is a directory (or deck.apkg → deck/)."""
+    if output.suffix == ".apkg":
+        return output.parent / output.stem
+    return output
+
+
+def _chapter_apkg_path(output_dir: Path, config: BookConfig, chapter_title: str) -> Path:
+    slug = chapter_filename_slug(chapter_title)
+    return output_dir / f"{_book_slug(config.deck_name)}-{slug}.apkg"
 
 
 @app.command("init-config")
@@ -125,9 +144,21 @@ def generate_cmd(
         "--resume",
         help="Skip chapters already present in --cards-json",
     ),
+    comprehensive: bool = typer.Option(
+        False,
+        "--comprehensive",
+        help="Cover all teachable content in each chapter (no card limit)",
+    ),
+    deck_per_chapter: bool = typer.Option(
+        False,
+        "--deck-per-chapter",
+        help="Write one .apkg file per chapter (-o is a directory)",
+    ),
 ) -> None:
     """Generate Anki deck from a PDF book."""
     config = load_config(config_path)
+    if comprehensive:
+        config.generation_style = GenerationStyle.COMPREHENSIVE
     chapters = extract_chapters(pdf, config)
 
     if chapter:
@@ -148,6 +179,18 @@ def generate_cmd(
         model = DEFAULT_LMSTUDIO_MODEL
 
     console.print(f"Generating cards for [bold]{len(chapters)}[/bold] chapter(s)...")
+    if comprehensive:
+        console.print(
+            "[cyan]Comprehensive mode:[/cyan] covering all teachable content per chapter "
+            "(may take longer and produce many cards)"
+        )
+    if deck_per_chapter:
+        if json_only:
+            console.print("[red]--deck-per-chapter requires .apkg output (omit --json-only)[/red]")
+            raise typer.Exit(1)
+        deck_dir = _deck_output_dir(output)
+        deck_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"[cyan]Deck per chapter:[/cyan] writing .apkg files to {deck_dir}/")
     if use_llm and not use_berlitz:
         effective_url = base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_LMSTUDIO_URL
         console.print(f"Using LLM ([dim]{model}[/dim] @ {effective_url})")
@@ -189,6 +232,15 @@ def generate_cmd(
                 continue
             console.print(f"       → {len(chapter_cards)} cards")
             cards.extend(chapter_cards)
+            if deck_per_chapter and chapter_cards:
+                apkg_path = _chapter_apkg_path(deck_dir, config, ch.title)
+                export_apkg(
+                    chapter_cards,
+                    config,
+                    apkg_path,
+                    deck_name=chapter_deck_name(config.deck_name, ch.title),
+                )
+                console.print(f"       [green]→[/green] {apkg_path.name}")
             if cards_json:
                 export_json(cards, cards_json)
             prof = profile_for_model(model)
@@ -200,7 +252,17 @@ def generate_cmd(
         console.print("Using Berlitz rule-based extraction ([dim]no API key required[/dim])")
         cards = []
         for ch in chapters:
-            cards.extend(extract_berlitz_cards(ch))
+            chapter_cards = extract_berlitz_cards(ch)
+            cards.extend(chapter_cards)
+            if deck_per_chapter and chapter_cards:
+                apkg_path = _chapter_apkg_path(deck_dir, config, ch.title)
+                export_apkg(
+                    chapter_cards,
+                    config,
+                    apkg_path,
+                    deck_name=chapter_deck_name(config.deck_name, ch.title),
+                )
+                console.print(f"  [green]→[/green] {apkg_path.name} ({len(chapter_cards)} cards)")
     console.print(f"Created [bold]{len(cards)}[/bold] cards.")
 
     if cards_json:
@@ -211,10 +273,13 @@ def generate_cmd(
         json_out = output if output.suffix == ".json" else output.with_suffix(".json")
         export_json(cards, json_out)
         console.print(f"[green]Wrote[/green] {json_out}")
-    else:
+    elif not deck_per_chapter:
         export_apkg(cards, config, output)
         console.print(f"[green]Wrote Anki deck to[/green] {output}")
         console.print("Import it in Anki: File → Import → select the .apkg file")
+    else:
+        console.print(f"[green]Wrote {len(chapters)} chapter deck(s) to[/green] {deck_dir}/")
+        console.print("Import each .apkg in AnkiDroid — one deck per chapter, no tag filtering needed")
 
 
 @app.command("export")
@@ -223,12 +288,66 @@ def export_cmd(
     output: Path = typer.Option(Path("deck.apkg"), "--output", "-o"),
     config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
     deck_name: Optional[str] = typer.Option(None, "--deck", help="Override deck name"),
+    deck_per_chapter: bool = typer.Option(
+        False,
+        "--deck-per-chapter",
+        help="Write one .apkg file per chapter (-o is a directory)",
+    ),
+    colpkg: bool = typer.Option(
+        False,
+        "--colpkg",
+        help="Same as --multideck but writes a .colpkg file (replaces collection on import)",
+    ),
+    multideck: bool = typer.Option(
+        False,
+        "--multideck",
+        help="One .apkg with a separate deck per chapter (merges into existing collection)",
+    ),
 ) -> None:
     """Export previously generated cards JSON to an Anki .apkg file."""
     config = load_config(config_path)
     if deck_name:
         config.deck_name = deck_name
     cards = load_json_cards(cards_json)
+
+    if (colpkg or multideck) and deck_per_chapter:
+        console.print("[red]Use either --multideck/--colpkg or --deck-per-chapter, not both[/red]")
+        raise typer.Exit(1)
+
+    if colpkg or multideck:
+        if colpkg:
+            out = export_colpkg(cards, config, output)
+        else:
+            out = export_multideck_apkg(cards, config, output)
+        chapters = len({c.chapter for c in cards})
+        console.print(
+            f"[green]Wrote[/green] {out} ({len(cards)} cards, {chapters} chapter decks)"
+        )
+        if multideck:
+            console.print("Import in AnkiDroid — adds decks without replacing your collection")
+        else:
+            console.print("Import in AnkiDroid: replaces your entire collection")
+        return
+
+    if deck_per_chapter:
+        deck_dir = _deck_output_dir(output)
+        deck_dir.mkdir(parents=True, exist_ok=True)
+        by_chapter: dict[str, list] = {}
+        for card in cards:
+            by_chapter.setdefault(card.chapter, []).append(card)
+        for chapter_name, chapter_cards in sorted(by_chapter.items()):
+            title = chapter_name  # cards store the label, not raw PDF title
+            apkg_path = deck_dir / f"{_book_slug(config.deck_name)}-{chapter_filename_slug(title)}.apkg"
+            export_apkg(
+                chapter_cards,
+                config,
+                apkg_path,
+                deck_name=chapter_deck_name(config.deck_name, title),
+            )
+            console.print(f"[green]Wrote[/green] {apkg_path.name} ({len(chapter_cards)} cards)")
+        console.print(f"[green]Wrote {len(by_chapter)} chapter deck(s) to[/green] {deck_dir}/")
+        return
+
     export_apkg(cards, config, output)
     console.print(f"[green]Wrote Anki deck to[/green] {output}")
 
